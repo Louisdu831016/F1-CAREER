@@ -1,0 +1,6 @@
+{
+  "name": "F1 CAREER - Simulateur de Carrière Motorsport",
+  "description": "Application web de simulation de carrière en sport automobile (Karting à F1), avec moteur de calcul de course, statistiques, budgets, sponsors et actualités.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
