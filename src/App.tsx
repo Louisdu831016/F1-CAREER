@@ -29,6 +29,7 @@ import { TeamSelection } from './components/TeamSelection';
 import { Dashboard } from './components/Dashboard';
 import { RaceSimulator } from './components/RaceSimulator';
 import { SeasonTransitionModal } from './components/SeasonTransitionModal';
+import { createInitialDriver, buildJSONResponse, calculateRaceExecution } from './utils/simulationEngine';
 
 export default function App() {
   const [gameState, setGameState] = useState<GameState>('creation_pilote');
@@ -46,6 +47,19 @@ export default function App() {
   const [systemMessage, setSystemMessage] = useState<string>('Bienvenue dans Pole Position X ! Créez votre pilote pour entamer votre ascension.');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showResetModal, setShowResetModal] = useState<boolean>(false);
+
+  const safeFetchJson = async <T,>(input: RequestInfo, init?: RequestInit): Promise<T> => {
+    const response = await fetch(input, init);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText} - ${text}`);
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch (err) {
+      throw new Error(`Invalid JSON from ${input}: ${err} - Response text: ${text}`);
+    }
+  };
 
   // Appliquer l'impact d'un choix pilote (sur piste ou hors piste)
   const handleApplyChoiceImpact = (impact: ChoiceImpactFeedback) => {
@@ -200,21 +214,32 @@ export default function App() {
   ) => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/simular', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'creation_pilote',
-          nom,
-          nationalite,
-          style,
-          origine
-        })
-      });
+      let data: GameResponseJSON;
+      try {
+        data = await safeFetchJson<GameResponseJSON>('/api/simular', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'creation_pilote',
+            nom,
+            nationalite,
+            style,
+            origine
+          })
+        });
+      } catch (error) {
+        console.warn('API /api/simular indisponible, fallback local création pilote :', error);
+        const fallback = createInitialDriver(nom, nationalite, style, origine);
+        data = buildJSONResponse(
+          'choix_equipe',
+          fallback.driver,
+          'Karting',
+          fallback.initialTeams,
+          fallback.initialSponsors,
+          `Bienvenue dans votre carrière Motorsport, ${fallback.driver.nom} ! Choisissez votre première écurie pour commencer votre saison.`
+        );
+      }
 
-      const data: GameResponseJSON = await res.json();
-
-      // Construire le pilote local enrichi
       const createdDriver: Driver = {
         nom: data.pilote.nom,
         nationalite: data.pilote.nationalite,
@@ -260,8 +285,31 @@ export default function App() {
     if (!driver) return;
     setIsLoading(true);
 
+    const catTeams = DEFAULT_TEAMS_BY_CATEGORY[categorie];
+    const selectedT = catTeams.find(t => t.id === teamId) || catTeams[0];
+    const selectedSps = SPONSORS_POOL.filter(s => sponsorIds.includes(s.id));
+
+    // Synchroniser les 19 rivaux : le joueur prend la place du 1er pilote de son écurie
+    const catCompetitors = GENERATED_COMPETITORS[categorie] || [];
+    const teamDrivers = catCompetitors.filter(c => 
+      c.equipeNom.toLowerCase().includes(selectedT.nom.toLowerCase()) ||
+      selectedT.nom.toLowerCase().includes(c.equipeNom.toLowerCase())
+    );
+
+    let filteredCompetitors = [...catCompetitors];
+    let teammateName = driver.relations?.nomCoequipier || 'Lucas Moreau';
+
+    if (teamDrivers.length >= 2) {
+      const replacedDriver = teamDrivers[0];
+      const teammate = teamDrivers[1];
+      teammateName = teammate.nom;
+      filteredCompetitors = catCompetitors.filter(c => c.id !== replacedDriver.id);
+    } else if (teamDrivers.length === 1) {
+      teammateName = teamDrivers[0].nom;
+    }
+
     try {
-      const res = await fetch('/api/simular', {
+      const data: GameResponseJSON = await safeFetchJson<GameResponseJSON>('/api/simular', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -272,30 +320,6 @@ export default function App() {
           categorieCurrent: categorie
         })
       });
-
-      const data: GameResponseJSON = await res.json();
-      const catTeams = DEFAULT_TEAMS_BY_CATEGORY[categorie];
-      const selectedT = catTeams.find(t => t.id === teamId) || catTeams[0];
-      const selectedSps = SPONSORS_POOL.filter(s => sponsorIds.includes(s.id));
-
-      // Synchroniser les 19 rivaux : le joueur prend la place du 1er pilote de son écurie
-      const catCompetitors = GENERATED_COMPETITORS[categorie] || [];
-      const teamDrivers = catCompetitors.filter(c => 
-        c.equipeNom.toLowerCase().includes(selectedT.nom.toLowerCase()) ||
-        selectedT.nom.toLowerCase().includes(c.equipeNom.toLowerCase())
-      );
-
-      let filteredCompetitors = [...catCompetitors];
-      let teammateName = driver.relations?.nomCoequipier || 'Lucas Moreau';
-
-      if (teamDrivers.length >= 2) {
-        const replacedDriver = teamDrivers[0];
-        const teammate = teamDrivers[1];
-        teammateName = teammate.nom;
-        filteredCompetitors = catCompetitors.filter(c => c.id !== replacedDriver.id);
-      } else if (teamDrivers.length === 1) {
-        teammateName = teamDrivers[0].nom;
-      }
 
       setDriver(prev => prev ? { 
         ...prev, 
@@ -312,7 +336,22 @@ export default function App() {
       setSystemMessage(data.messageSystème);
       setGameState('tableau_de_bord');
     } catch (error) {
-      console.error("Erreur choix équipe:", error);
+      console.warn('API /api/simular indisponible, fallback local choix équipe :', error);
+      const updatedBudget = Math.max(0, driver.budget - selectedT.coutSaison);
+      setDriver(prev => prev ? { 
+        ...prev, 
+        budget: updatedBudget,
+        relations: {
+          ...prev.relations,
+          nomCoequipier: teammateName
+        }
+      } : null);
+
+      setCurrentTeam(selectedT);
+      setSponsors(selectedSps);
+      setStandings(filteredCompetitors);
+      setSystemMessage(`Contrat signé avec succès chez ${selectedT.nom} ! Solde restant : ${updatedBudget.toLocaleString()} €. Objectif fixé par le team : "${selectedT.objectifSaison}". Rendez-vous sur le tableau de bord.`);
+      setGameState('tableau_de_bord');
     } finally {
       setIsLoading(false);
     }
@@ -324,27 +363,39 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const res = await fetch('/api/simular', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'course',
-          driverState: driver,
-          teamId: currentTeam.id,
-          circuitId: nextCircuit.id,
-          strategy,
-          categorieCurrent: categorie
-        })
-      });
+      let raceRes: RaceResult;
+      let systemMessage = '';
 
-      const data = await res.json();
-      const raceRes: RaceResult = data.resultatDetaille;
+      try {
+        const data: GameResponseJSON = await safeFetchJson<GameResponseJSON>('/api/simular', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'course',
+            driverState: driver,
+            teamId: currentTeam.id,
+            circuitId: nextCircuit.id,
+            strategy,
+            categorieCurrent: categorie
+          })
+        });
 
-      // Mettre à jour l'état du pilote
+        const serverRaceRes = (data as any).resultatDetaille as RaceResult | undefined;
+        if (!serverRaceRes) {
+          throw new Error('Réponse de course invalide');
+        }
+        raceRes = serverRaceRes;
+        systemMessage = data.messageSystème;
+      } catch (error) {
+        console.warn('API /api/simular indisponible ou réponse invalide, fallback local course :', error);
+        raceRes = calculateRaceExecution(driver, currentTeam, sponsors, nextCircuit, strategy, GENERATED_COMPETITORS[categorie]);
+        systemMessage = `Course simulée localement : P${raceRes.positionFinale} à ${nextCircuit.nom}. Gains : +${raceRes.gainFinancier.toLocaleString()} €.`;
+      }
+
       setDriver(prev => prev ? {
         ...prev,
-        budget: data.pilote.budget,
-        reputation: data.pilote.reputation,
+        budget: prev.budget + raceRes.gainFinancier,
+        reputation: Math.min(100, Math.max(0, prev.reputation + raceRes.gainReputation)),
         pointsChampionnat: prev.pointsChampionnat + raceRes.pointsGagnes,
         coursesTotales: prev.coursesTotales + 1,
         victoires: raceRes.positionFinale === 1 ? prev.victoires + 1 : prev.victoires,
@@ -353,9 +404,8 @@ export default function App() {
       } : null);
 
       setLastRaceResult(raceRes);
-      setSystemMessage(data.messageSystème);
+      setSystemMessage(systemMessage);
 
-      // Mettre à jour les points des rivaux dans le classement du championnat
       if (raceRes && raceRes.classementFinal) {
         setStandings(prevStandings => {
           return prevStandings.map(s => {
@@ -371,9 +421,7 @@ export default function App() {
         });
       }
 
-      // Récupérer un commentaire Gemini immersif
       fetchGeminiCommentary(driver.nom, nextCircuit.nom, raceRes.positionFinale, raceRes.meteo);
-
       setGameState('resultat_course');
     } catch (error) {
       console.error("Erreur simulation course:", error);
@@ -389,7 +437,7 @@ export default function App() {
     weather: string
   ) => {
     try {
-      const res = await fetch('/api/gemini/commentary', {
+      const data = await safeFetchJson<{ commentary?: string }>('/api/gemini/commentary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -400,7 +448,6 @@ export default function App() {
           category: categorie
         })
       });
-      const data = await res.json();
       if (data.commentary) setGeminiCommentary(data.commentary);
     } catch (e) {
       console.warn("Flash commentaire indisponible:", e);

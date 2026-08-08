@@ -228,7 +228,7 @@ export const RaceSimulator: React.FC<RaceSimulatorProps> = ({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               driverName: driver.nom,
-              category: raceResult.circuit.id,
+              category: 'Motorsport',
               circuitName: raceResult.circuit.nom,
               lap: currentLap.lap,
               totalLaps,
